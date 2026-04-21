@@ -1,6 +1,8 @@
 streamlit
+celery
+redis
+sqlalchemy
 ezdxf
 shapely
-pyclipper
 matplotlib
 svgelements
