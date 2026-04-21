@@ -4,6 +4,3 @@ shapely
 pyclipper
 matplotlib
 svgelements
-io
-random 
-multiprocessing
