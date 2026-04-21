@@ -8,8 +8,17 @@ from shapely.ops import unary_union, polygonize
 from shapely.affinity import rotate, translate
 import io
 import svgelements
+import subprocess
+import tempfile
+import os
+import xml.etree.ElementTree as ET
+import uuid
 
 st.set_page_config(page_title="ProNester Industrial", layout="wide")
+
+# ---------------- SESSION ----------------
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
 
 # ---------------- ENGINE ----------------
 class ProNester:
@@ -18,235 +27,232 @@ class ProNester:
         self.gap = gap
         self.margin = margin
 
-    # ---------- FILE READ ----------
-    def extract_from_svg(self, file):
-        svg = svgelements.SVG.parse(io.StringIO(file.getvalue().decode()))
-        polys = []
-
-        for e in svg.elements():
-            if isinstance(e, svgelements.Path):
-                pts = [(p.x, p.y) for p in e.as_points()]
-                if len(pts) > 2:
-                    poly = Polygon(pts)
-                    if not poly.is_valid:
-                        poly = poly.buffer(0)
-                    if poly.area > 1:
-                        polys.append(translate(poly, -poly.bounds[0], -poly.bounds[1]))
-        return polys
-
-    def extract_from_dxf(self, file):
-        doc = ezdxf.read(io.BytesIO(file.getvalue()))
-        msp = doc.modelspace()
-        segs = []
-
-        for e in msp:
-            try:
-                for p in path.make_paths(e):
-                    v = list(p.flattening(0.1))
-                    for i in range(len(v)-1):
-                        segs.append([(v[i].x, v[i].y), (v[i+1].x, v[i+1].y)])
-            except:
-                pass
-
-        merged = unary_union(MultiLineString(segs))
-        healed = merged.buffer(0.02).buffer(-0.02)
-        polys = list(polygonize(healed))
-
-        return [translate(p, -p.bounds[0], -p.bounds[1]) for p in polys if p.area > 1]
-
-    # ---------- ROTATIONS ----------
     def generate_rotations(self, part):
         angles = [0, 90, 180, 270]
         result = []
-
         for a in angles:
             r = rotate(part, a, origin='centroid')
             minx, miny, maxx, maxy = r.bounds
-            r = translate(r, -minx, -miny)
-            result.append(r)
-
+            result.append(translate(r, -minx, -miny))
         return result
 
-    # ---------- CANDIDATE POINTS ----------
     def get_candidates(self, placed):
         pts = [(self.margin, self.margin)]
-
         for p in placed:
             minx, miny, maxx, maxy = p.bounds
             pts.append((maxx, miny))
             pts.append((minx, maxy))
-
         return pts
 
-    # ---------- PLACEMENT ----------
     def place_part(self, part, placed):
-
         best = None
-        best_y = float('inf')
-        best_x = float('inf')
+        best_y, best_x = float('inf'), float('inf')
 
-        rotations = self.generate_rotations(part)
-        candidates = self.get_candidates(placed)
-
-        for r in rotations:
-            for cx, cy in candidates:
-
+        for r in self.generate_rotations(part):
+            for cx, cy in self.get_candidates(placed):
                 trial = translate(r, cx, cy)
 
-                if any(trial.intersects(p) for p in placed):
+                if placed and trial.intersects(unary_union(placed)):
                     continue
 
                 tx, ty = trial.bounds[0], trial.bounds[1]
 
                 if ty < best_y or (ty == best_y and tx < best_x):
-                    best = trial
-                    best_y = ty
-                    best_x = tx
+                    best, best_y, best_x = trial, ty, tx
 
         return best
 
-    # ---------- NEST ----------
     def nest(self, parts):
-
         parts = sorted(parts, key=lambda p: p.area, reverse=True)
         parts = [p.buffer(self.gap / 2) for p in parts]
 
         placed = []
-
         for part in parts:
             pos = self.place_part(part, placed)
-
-            if pos:
-                placed.append(pos)
-            else:
-                placed.append(translate(part, self.margin, self.margin))
+            placed.append(pos if pos else translate(part, self.margin, self.margin))
 
         union = unary_union(placed)
-        minx, miny, maxx, maxy = union.bounds
+        _, _, maxx, maxy = union.bounds
 
         W = maxx + self.margin
         H = maxy + self.margin
 
-        total_area = sum(p.area for p in parts)
-        util = (total_area / (W * H)) * 100
-
+        util = (sum(p.area for p in parts) / (W * H)) * 100
         return W, H, placed, util
 
 
-# ---------- METRICS ----------
-def calculate_metrics(parts, W, H, density, thickness, cost_per_kg, scrap_rate):
+# ---------------- CACHED FILE READ ----------------
+@st.cache_data(show_spinner=False)
+def extract_svg(file_bytes):
+    svg = svgelements.SVG.parse(io.StringIO(file_bytes.decode()))
+    polys = []
 
+    for e in svg.elements():
+        if isinstance(e, svgelements.Path):
+            pts = [(p.x, p.y) for p in e.as_points()]
+            if len(pts) > 2:
+                poly = Polygon(pts)
+                if not poly.is_valid:
+                    poly = poly.buffer(0)
+                if poly.area > 1:
+                    polys.append(translate(poly, -poly.bounds[0], -poly.bounds[1]))
+    return polys
+
+
+@st.cache_data(show_spinner=False)
+def extract_dxf(file_bytes):
+    doc = ezdxf.read(io.BytesIO(file_bytes))
+    msp = doc.modelspace()
+    segs = []
+
+    for e in msp:
+        try:
+            for p in path.make_paths(e):
+                v = list(p.flattening(0.1))
+                for i in range(len(v)-1):
+                    segs.append([(v[i].x, v[i].y), (v[i+1].x, v[i+1].y)])
+        except:
+            pass
+
+    merged = unary_union(MultiLineString(segs))
+    healed = merged.buffer(0.02).buffer(-0.02)
+    polys = list(polygonize(healed))
+
+    return [translate(p, -p.bounds[0], -p.bounds[1]) for p in polys if p.area > 1]
+
+
+# ---------------- DEEPNEST ----------------
+DEEPNEST_CMD = ["deepnest"]  # change if needed
+
+def run_deepnest(svg_text):
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            inp = os.path.join(tmp, "input.svg")
+            out = os.path.join(tmp, "output.svg")
+
+            with open(inp, "w") as f:
+                f.write(svg_text)
+
+            cmd = DEEPNEST_CMD + [inp, "-o", out, "--rotations", "8", "--spacing", "3"]
+            subprocess.run(cmd, check=True)
+
+            with open(out, "r") as f:
+                return f.read()
+
+    except Exception as e:
+        st.error(f"Deepnest error: {e}")
+        return None
+
+
+def polygons_to_svg(polys):
+    svg = ['<svg xmlns="http://www.w3.org/2000/svg">']
+    for p in polys:
+        coords = " ".join([f"{x},{y}" for x, y in p.exterior.coords])
+        svg.append(f'<polygon points="{coords}" fill="none" stroke="black"/>')
+    svg.append("</svg>")
+    return "\n".join(svg)
+
+
+def parse_svg(svg_text):
+    root = ET.fromstring(svg_text)
+    polys = []
+
+    for elem in root.findall(".//{http://www.w3.org/2000/svg}polygon"):
+        pts = elem.attrib["points"].split()
+        coords = [(float(p.split(",")[0]), float(p.split(",")[1])) for p in pts]
+        polys.append(Polygon(coords))
+
+    return polys
+
+
+# ---------------- METRICS ----------------
+def calculate_metrics(parts, W, H, density, thickness, cost, scrap_rate):
     part_area = sum(p.area for p in parts) / 1e6
     sheet_area = (W * H) / 1e6
 
-    thickness_m = thickness / 1000
+    t = thickness / 1000
 
-    part_weight = part_area * thickness_m * density
-    sheet_weight = sheet_area * thickness_m * density
-
+    part_weight = part_area * t * density
+    sheet_weight = sheet_area * t * density
     scrap_weight = sheet_weight - part_weight
 
-    total_cost = sheet_weight * cost_per_kg
-    used_cost = part_weight * cost_per_kg
-    scrap_value = scrap_weight * scrap_rate
-
-    scrap_percent = (sheet_area - part_area) / sheet_area * 100
-
     return {
-        "part_weight": part_weight,
         "sheet_weight": sheet_weight,
-        "scrap_weight": scrap_weight,
-        "total_cost": total_cost,
-        "used_cost": used_cost,
-        "scrap_value": scrap_value,
-        "scrap_percent": scrap_percent
+        "part_weight": part_weight,
+        "cost": sheet_weight * cost,
+        "scrap_value": scrap_weight * scrap_rate,
+        "scrap_percent": (sheet_area - part_area) / sheet_area * 100
     }
 
 
 # ---------------- UI ----------------
-st.title("⚙️ ProNester – Smart Nesting + Costing")
+st.title("⚙️ ProNester – Hybrid Nesting (Fast + Deepnest)")
 
 with st.sidebar:
-    st.header("Settings")
-
     GAP = st.slider("Gap (mm)", 0.0, 10.0, 3.0)
     MARGIN = st.slider("Margin (mm)", 0.0, 20.0, 5.0)
 
-    st.header("Material")
+    density = st.number_input("Density", value=7850)
+    thickness = st.number_input("Thickness", value=2.0)
+    cost = st.number_input("Cost ₹/kg", value=70.0)
+    scrap_rate = st.number_input("Scrap ₹/kg", value=25.0)
 
-    density = st.number_input("Density (kg/m³)", value=7850)
-    thickness = st.number_input("Thickness (mm)", value=2.0)
-    cost_per_kg = st.number_input("Cost (₹/kg)", value=70.0)
-    scrap_rate = st.number_input("Scrap Value (₹/kg)", value=25.0)
-
-    files = st.file_uploader("Upload DXF / SVG", type=["dxf", "svg"], accept_multiple_files=True)
+    files = st.file_uploader("Upload DXF/SVG", type=["dxf","svg"], accept_multiple_files=True)
 
 if files:
     engine = ProNester(GAP, MARGIN)
     parts = []
 
-    st.subheader("Set Quantity")
-
     for f in files:
-        shapes = engine.extract_from_svg(f) if f.name.endswith(".svg") else engine.extract_from_dxf(f)
+        data = f.getvalue()
+        shapes = extract_svg(data) if f.name.endswith(".svg") else extract_dxf(data)
 
         if shapes:
-            c1, c2 = st.columns([3,1])
-            c1.write(f"✅ {f.name}")
-            qty = c2.number_input("Qty", 1, 100, 1, key=f.name)
-
+            qty = st.number_input(f"{f.name} Qty", 1, 100, 1, key=f.name)
             for _ in range(qty):
                 parts.extend(shapes)
 
-    if st.button("🚀 Run Nesting"):
+    col1, col2 = st.columns(2)
 
-        with st.spinner("Nesting in progress..."):
-            W, H, layout, util = engine.nest(parts)
+    if col1.button("⚡ Quick Nest"):
+        W, H, layout, util = engine.nest(parts)
+        st.session_state.quick = (W, H, layout, util)
 
-        metrics = calculate_metrics(parts, W, H, density, thickness, cost_per_kg, scrap_rate)
+    if col2.button("🔥 Deepnest Optimize"):
+        svg = polygons_to_svg(parts)
+        result = run_deepnest(svg)
 
-        st.success(f"""
-        📐 Sheet Size: **{W:.0f} x {H:.0f} mm**  
-        📊 Utilization: **{util:.2f}%**
-        """)
+        if result:
+            layout = parse_svg(result)
+            union = unary_union(layout)
+            _, _, maxx, maxy = union.bounds
+            st.session_state.deep = (maxx, maxy, layout)
 
-        # -------- METRICS --------
-        st.subheader("📊 Production Metrics")
+# ---------------- DISPLAY ----------------
+def show_result(title, W, H, layout):
+    st.subheader(title)
+    st.write(f"📐 {W:.0f} x {H:.0f} mm")
 
-        c1, c2, c3 = st.columns(3)
+    fig, ax = plt.subplots(figsize=(10,5))
+    ax.set_aspect('equal')
 
-        c1.metric("Part Weight (kg)", f"{metrics['part_weight']:.2f}")
-        c1.metric("Sheet Weight (kg)", f"{metrics['sheet_weight']:.2f}")
+    for p in layout:
+        x,y = p.exterior.xy
+        ax.fill(x,y,alpha=0.5)
 
-        c2.metric("Material Cost (₹)", f"{metrics['total_cost']:.0f}")
-        c2.metric("Used Cost (₹)", f"{metrics['used_cost']:.0f}")
+    st.pyplot(fig)
 
-        c3.metric("Scrap %", f"{metrics['scrap_percent']:.2f}%")
-        c3.metric("Scrap Value (₹)", f"{metrics['scrap_value']:.0f}")
+if "quick" in st.session_state:
+    W,H,layout,util = st.session_state.quick
+    show_result("⚡ Quick Nest", W, H, layout)
 
-        # -------- VISUAL --------
-        fig, ax = plt.subplots(figsize=(12,6))
-        ax.set_aspect('equal')
+    m = calculate_metrics(layout, W, H, density, thickness, cost, scrap_rate)
+    st.write(m)
 
-        ax.add_patch(patches.Rectangle((0,0), W, H, fill=False))
+if "deep" in st.session_state:
+    W,H,layout = st.session_state.deep
+    show_result("🔥 Deepnest Result", W, H, layout)
 
-        for poly in layout:
-            x,y = poly.exterior.xy
-            ax.fill(x, y, alpha=0.5)
-
-        st.pyplot(fig)
-
-        # -------- DXF --------
-        doc = ezdxf.new()
-        msp = doc.modelspace()
-
-        for poly in layout:
-            msp.add_lwpolyline(list(poly.exterior.coords))
-
-        dxf_io = io.StringIO()
-        doc.write(dxf_io)
-
-        st.download_button("📥 Download DXF", dxf_io.getvalue(), "nest_output.dxf")
-
-else:
-    st.info("Upload DXF or SVG files to start.")
+    m = calculate_metrics(layout, W, H, density, thickness, cost, scrap_rate)
+    st.success(f"Utilization improved")
+    st.write(m)
