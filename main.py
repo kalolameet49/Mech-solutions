@@ -9,15 +9,16 @@ from shapely.affinity import rotate, translate
 import io
 import svgelements
 
-st.set_page_config(page_title="ProNester Smart Planner", layout="wide")
+st.set_page_config(page_title="True Nesting - Auto Sheet Size", layout="wide")
 
-# -------- ENGINE --------
-class SmartNester:
+# ---------------- ENGINE ----------------
+class TrueNester:
 
     def __init__(self, gap=3.0, margin=5.0):
         self.gap = gap
         self.margin = margin
 
+    # -------- FILE READERS --------
     def extract_from_svg(self, file):
         svg = svgelements.SVG.parse(io.StringIO(file.getvalue().decode()))
         polys = []
@@ -49,20 +50,27 @@ class SmartNester:
 
         merged = unary_union(MultiLineString(segs))
         healed = merged.buffer(0.02).buffer(-0.02)
-
         polys = list(polygonize(healed))
+
         return [translate(p, -p.bounds[0], -p.bounds[1]) for p in polys if p.area > 1]
 
-    def nest_on_sheet(self, parts, W, H):
-        sheets = [[]]
+    # -------- TRUE NEST --------
+    def nest_and_minimize(self, parts):
+
         parts = sorted(parts, key=lambda p: p.area, reverse=True)
         parts = [p.buffer(self.gap/2) for p in parts]
 
+        placed = []
+
+        # BIG virtual sheet
+        LIMIT = 10000
+
         for part in parts:
-            placed = False
+            placed_flag = False
 
             for angle in [0, 90]:
-                if placed: break
+                if placed_flag:
+                    break
 
                 r = rotate(part, angle, origin='centroid')
                 minx, miny, maxx, maxy = r.bounds
@@ -71,73 +79,48 @@ class SmartNester:
                 w, h = maxx-minx, maxy-miny
                 step = max(10, int(min(w,h)/3))
 
-                for sid, sheet in enumerate(sheets):
-                    for y in range(int(self.margin), int(H-h-self.margin), step):
-                        for x in range(int(self.margin), int(W-w-self.margin), step):
+                for y in range(int(self.margin), LIMIT, step):
+                    for x in range(int(self.margin), LIMIT, step):
 
-                            trial = translate(r, x, y)
+                        trial = translate(r, x, y)
 
-                            if not any(trial.intersects(p) for p in sheet):
-                                sheets[sid].append(trial)
-                                placed = True
-                                break
-                        if placed: break
-                    if placed: break
+                        if not any(trial.intersects(p) for p in placed):
+                            placed.append(trial)
+                            placed_flag = True
+                            break
 
-            if not placed:
-                sheets.append([translate(part, self.margin, self.margin)])
+                    if placed_flag:
+                        break
 
-        total_area = sum(p.area for p in parts)
-        total_sheet_area = len(sheets) * W * H
-        utilization = (total_area / total_sheet_area) * 100
+            if not placed_flag:
+                placed.append(r)
 
-        return sheets, utilization
+        # -------- BOUNDING BOX --------
+        union = unary_union(placed)
+        minx, miny, maxx, maxy = union.bounds
 
-    def optimize_standard_sheets(self, parts):
+        width = maxx + self.margin
+        height = maxy + self.margin
 
-        standard_sizes = [
-            (2500,1250),
-            (3000,1500),
-            (2000,1000),
-            (1500,3000)
-        ]
+        total_part_area = sum(p.area for p in parts)
+        sheet_area = width * height
 
-        best = None
+        utilization = (total_part_area / sheet_area) * 100
 
-        for W, H in standard_sizes:
+        return width, height, placed, utilization
 
-            sheets, util = self.nest_on_sheet(parts, W, H)
 
-            result = {
-                "W": W,
-                "H": H,
-                "sheets": len(sheets),
-                "util": util,
-                "layouts": sheets
-            }
-
-            if best is None:
-                best = result
-            else:
-                # priority: fewer sheets, then higher utilization
-                if result["sheets"] < best["sheets"] or (
-                    result["sheets"] == best["sheets"] and result["util"] > best["util"]
-                ):
-                    best = result
-
-        return best
-
-# -------- UI --------
-st.title("⚙️ ProNester – Smart Sheet Optimizer")
+# ---------------- UI ----------------
+st.title("⚙️ ProNester – Minimum Sheet Size Finder")
 
 with st.sidebar:
     GAP = st.slider("Gap (mm)", 0.0, 10.0, 3.0)
     MARGIN = st.slider("Margin (mm)", 0.0, 20.0, 5.0)
 
-    files = st.file_uploader("Upload DXF/SVG", type=["dxf","svg"], accept_multiple_files=True)
+    files = st.file_uploader("Upload DXF / SVG", type=["dxf","svg"], accept_multiple_files=True)
 
 if files:
-    engine = SmartNester(GAP, MARGIN)
+    engine = TrueNester(GAP, MARGIN)
     parts = []
 
     st.subheader("Set Quantity")
@@ -146,39 +129,46 @@ if files:
         shapes = engine.extract_from_svg(f) if f.name.endswith(".svg") else engine.extract_from_dxf(f)
 
         if shapes:
-            c1,c2 = st.columns([3,1])
+            c1, c2 = st.columns([3,1])
             c1.write(f"✅ {f.name}")
-            qty = c2.number_input("Qty",1,100,1,key=f.name)
+            qty = c2.number_input("Qty", 1, 100, 1, key=f.name)
 
             for _ in range(qty):
                 parts.extend(shapes)
 
-    if st.button("🚀 Optimize Sheet Selection"):
+    if st.button("🚀 Find Minimum Sheet Size"):
 
-        with st.spinner("Finding best sheet size..."):
-            best = engine.optimize_standard_sheets(parts)
+        with st.spinner("Performing true nesting..."):
+            W, H, layout, util = engine.nest_and_minimize(parts)
 
-        st.success(
-            f"""
-            🏆 Best Sheet Size: **{best['W']} x {best['H']} mm**  
-            📄 Sheets Required: **{best['sheets']}**  
-            📊 Utilization: **{best['util']:.2f}%**
-            """
-        )
+        st.success(f"""
+        📐 Minimum Required Sheet Size: **{W:.0f} x {H:.0f} mm**  
+        📊 Utilization: **{util:.2f}%**
+        """)
 
+        # -------- PLOT --------
         fig, ax = plt.subplots(figsize=(12,6))
         ax.set_aspect('equal')
 
-        for i, sheet in enumerate(best["layouts"]):
-            offset = i * (best["W"] + 200)
+        ax.add_patch(patches.Rectangle((0,0), W, H, fill=False))
 
-            ax.add_patch(patches.Rectangle((offset,0), best["W"], best["H"], fill=False))
-
-            for poly in sheet:
-                x,y = poly.exterior.xy
-                ax.fill([px+offset for px in x], y, alpha=0.5)
+        for poly in layout:
+            x,y = poly.exterior.xy
+            ax.fill(x, y, alpha=0.5)
 
         st.pyplot(fig)
+
+        # -------- DXF EXPORT --------
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+
+        for poly in layout:
+            msp.add_lwpolyline(list(poly.exterior.coords))
+
+        dxf_io = io.StringIO()
+        doc.write(dxf_io)
+
+        st.download_button("📥 Download Nested DXF", dxf_io.getvalue(), "nested_output.dxf")
 
 else:
     st.info("Upload files to begin")
