@@ -9,20 +9,19 @@ from shapely.affinity import rotate, translate
 import io
 import svgelements
 
-st.set_page_config(page_title="True Nesting - Auto Sheet Size", layout="wide")
+st.set_page_config(page_title="ProNester NFP Engine", layout="wide")
 
 # ---------------- ENGINE ----------------
-class TrueNester:
+class NFPNester:
 
     def __init__(self, gap=3.0, margin=5.0):
         self.gap = gap
         self.margin = margin
 
-    # -------- FILE READERS --------
+    # ---------- FILE READ ----------
     def extract_from_svg(self, file):
         svg = svgelements.SVG.parse(io.StringIO(file.getvalue().decode()))
         polys = []
-
         for e in svg.elements():
             if isinstance(e, svgelements.Path):
                 pts = [(p.x, p.y) for p in e.as_points()]
@@ -54,64 +53,85 @@ class TrueNester:
 
         return [translate(p, -p.bounds[0], -p.bounds[1]) for p in polys if p.area > 1]
 
-    # -------- TRUE NEST --------
-    def nest_and_minimize(self, parts):
+    # ---------- APPROX NFP ----------
+    def create_nfp_region(self, placed_parts):
+        """
+        Create forbidden region using buffered union (approx Minkowski sum)
+        """
+        if not placed_parts:
+            return None
+        return unary_union([p.buffer(self.gap) for p in placed_parts])
+
+    # ---------- PLACEMENT ----------
+    def place_part_nfp(self, part, placed_parts):
+        """
+        Bottom-left placement using NFP approximation
+        """
+        nfp_region = self.create_nfp_region(placed_parts)
+
+        LIMIT = 5000
+        step = max(5, int(min(part.bounds[2]-part.bounds[0],
+                              part.bounds[3]-part.bounds[1]) / 4))
+
+        best_pos = None
+
+        for y in range(int(self.margin), LIMIT, step):
+            for x in range(int(self.margin), LIMIT, step):
+
+                trial = translate(part, x, y)
+
+                if nfp_region:
+                    if trial.intersects(nfp_region):
+                        continue
+
+                best_pos = trial
+                return best_pos
+
+        return None
+
+    # ---------- MAIN NEST ----------
+    def nest_nfp(self, parts):
 
         parts = sorted(parts, key=lambda p: p.area, reverse=True)
         parts = [p.buffer(self.gap/2) for p in parts]
 
         placed = []
 
-        # BIG virtual sheet
-        LIMIT = 10000
-
         for part in parts:
+
             placed_flag = False
 
             for angle in [0, 90]:
-                if placed_flag:
-                    break
-
                 r = rotate(part, angle, origin='centroid')
                 minx, miny, maxx, maxy = r.bounds
                 r = translate(r, -minx, -miny)
 
-                w, h = maxx-minx, maxy-miny
-                step = max(10, int(min(w,h)/3))
+                pos = self.place_part_nfp(r, placed)
 
-                for y in range(int(self.margin), LIMIT, step):
-                    for x in range(int(self.margin), LIMIT, step):
-
-                        trial = translate(r, x, y)
-
-                        if not any(trial.intersects(p) for p in placed):
-                            placed.append(trial)
-                            placed_flag = True
-                            break
-
-                    if placed_flag:
-                        break
+                if pos:
+                    placed.append(pos)
+                    placed_flag = True
+                    break
 
             if not placed_flag:
-                placed.append(r)
+                # fallback
+                placed.append(translate(r, self.margin, self.margin))
 
-        # -------- BOUNDING BOX --------
+        # ---------- BOUNDING ----------
         union = unary_union(placed)
         minx, miny, maxx, maxy = union.bounds
 
-        width = maxx + self.margin
-        height = maxy + self.margin
+        W = maxx + self.margin
+        H = maxy + self.margin
 
-        total_part_area = sum(p.area for p in parts)
-        sheet_area = width * height
+        total_area = sum(p.area for p in parts)
+        util = (total_area / (W * H)) * 100
 
-        utilization = (total_part_area / sheet_area) * 100
-
-        return width, height, placed, utilization
+        return W, H, placed, util
 
 
 # ---------------- UI ----------------
-st.title("⚙️ ProNester – Minimum Sheet Size Finder")
+st.title("⚙️ ProNester – NFP Based Nesting")
 
 with st.sidebar:
     GAP = st.slider("Gap (mm)", 0.0, 10.0, 3.0)
@@ -120,7 +140,7 @@ with st.sidebar:
     files = st.file_uploader("Upload DXF / SVG", type=["dxf","svg"], accept_multiple_files=True)
 
 if files:
-    engine = TrueNester(GAP, MARGIN)
+    engine = NFPNester(GAP, MARGIN)
     parts = []
 
     st.subheader("Set Quantity")
@@ -136,17 +156,16 @@ if files:
             for _ in range(qty):
                 parts.extend(shapes)
 
-    if st.button("🚀 Find Minimum Sheet Size"):
+    if st.button("🚀 Run NFP Nesting"):
 
-        with st.spinner("Performing true nesting..."):
-            W, H, layout, util = engine.nest_and_minimize(parts)
+        with st.spinner("Running NFP nesting..."):
+            W, H, layout, util = engine.nest_nfp(parts)
 
         st.success(f"""
-        📐 Minimum Required Sheet Size: **{W:.0f} x {H:.0f} mm**  
+        📐 Minimum Sheet Size: **{W:.0f} x {H:.0f} mm**  
         📊 Utilization: **{util:.2f}%**
         """)
 
-        # -------- PLOT --------
         fig, ax = plt.subplots(figsize=(12,6))
         ax.set_aspect('equal')
 
@@ -158,7 +177,7 @@ if files:
 
         st.pyplot(fig)
 
-        # -------- DXF EXPORT --------
+        # DXF Export
         doc = ezdxf.new()
         msp = doc.modelspace()
 
@@ -168,7 +187,7 @@ if files:
         dxf_io = io.StringIO()
         doc.write(dxf_io)
 
-        st.download_button("📥 Download Nested DXF", dxf_io.getvalue(), "nested_output.dxf")
+        st.download_button("📥 Download DXF", dxf_io.getvalue(), "nfp_output.dxf")
 
 else:
     st.info("Upload files to begin")
