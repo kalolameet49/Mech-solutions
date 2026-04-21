@@ -6,235 +6,179 @@ import matplotlib.patches as patches
 from shapely.geometry import Polygon, MultiLineString
 from shapely.ops import unary_union, polygonize
 from shapely.affinity import rotate, translate
-import time
 import io
 import svgelements
 
-# --- PAGE SETUP ---
-st.set_page_config(page_title="ProNester Industrial", layout="wide")
+st.set_page_config(page_title="ProNester Smart Planner", layout="wide")
 
-class ProNesterEngine:
-    def __init__(self, sheet_w, sheet_h, gap=3.0, margin=5.0):
-        self.sheet_w = sheet_w
-        self.sheet_h = sheet_h
+# -------- ENGINE --------
+class SmartNester:
+
+    def __init__(self, gap=3.0, margin=5.0):
         self.gap = gap
         self.margin = margin
-        self.sheets = [[]]
-        self.utilization = 0
 
-    def extract_from_svg(self, uploaded_file):
-        try:
-            svg_text = uploaded_file.getvalue().decode("utf-8")
-            svg = svgelements.SVG.parse(io.StringIO(svg_text))
-            polys = []
+    def extract_from_svg(self, file):
+        svg = svgelements.SVG.parse(io.StringIO(file.getvalue().decode()))
+        polys = []
 
-            for element in svg.elements():
-                if isinstance(element, svgelements.Path):
-                    pts = [(p.x, p.y) for p in element.as_points()]
-                    if len(pts) > 2:
-                        poly = Polygon(pts)
-                        if not poly.is_valid:
-                            poly = poly.buffer(0)
-                        if poly.area > 1.0:
-                            min_x, min_y, _, _ = poly.bounds
-                            polys.append(translate(poly, -min_x, -min_y))
-            return polys
+        for e in svg.elements():
+            if isinstance(e, svgelements.Path):
+                pts = [(p.x, p.y) for p in e.as_points()]
+                if len(pts) > 2:
+                    poly = Polygon(pts)
+                    if not poly.is_valid:
+                        poly = poly.buffer(0)
+                    if poly.area > 1:
+                        polys.append(translate(poly, -poly.bounds[0], -poly.bounds[1]))
+        return polys
 
-        except Exception as e:
-            st.error(f"SVG Error: {e}")
-            return []
+    def extract_from_dxf(self, file):
+        doc = ezdxf.read(io.BytesIO(file.getvalue()))
+        msp = doc.modelspace()
+        segs = []
 
-    def extract_from_dxf(self, uploaded_file):
-        try:
-            doc = ezdxf.read(io.BytesIO(uploaded_file.getvalue()))
-            msp = doc.modelspace()
-            all_segments = []
+        for e in msp:
+            try:
+                for p in path.make_paths(e):
+                    v = list(p.flattening(0.1))
+                    for i in range(len(v)-1):
+                        segs.append([(v[i].x, v[i].y), (v[i+1].x, v[i+1].y)])
+            except:
+                pass
 
-            for entity in msp:
-                try:
-                    entity_paths = path.make_paths(entity)
-                    for p in entity_paths:
-                        vertices = list(p.flattening(distance=0.1))
-                        for i in range(len(vertices) - 1):
-                            v1, v2 = vertices[i], vertices[i+1]
-                            all_segments.append([
-                                (round(v1.x, 3), round(v1.y, 3)),
-                                (round(v2.x, 3), round(v2.y, 3))
-                            ])
-                except:
-                    continue
+        merged = unary_union(MultiLineString(segs))
+        healed = merged.buffer(0.02).buffer(-0.02)
 
-            merged = unary_union(MultiLineString(all_segments))
-            healed = merged.buffer(0.02).buffer(-0.02)
-            found_polys = list(polygonize(healed))
+        polys = list(polygonize(healed))
+        return [translate(p, -p.bounds[0], -p.bounds[1]) for p in polys if p.area > 1]
 
-            return [
-                translate(p, -p.bounds[0], -p.bounds[1])
-                for p in found_polys if p.area > 1.0
-            ]
+    def nest_on_sheet(self, parts, W, H):
+        sheets = [[]]
+        parts = sorted(parts, key=lambda p: p.area, reverse=True)
+        parts = [p.buffer(self.gap/2) for p in parts]
 
-        except Exception as e:
-            st.error(f"DXF Error: {e}")
-            return []
-
-    def nest(self, parts_list):
-        parts_list.sort(key=lambda p: p.area, reverse=True)
-
-        buffered_parts = [
-            p.buffer(self.gap / 2, join_style=2)
-            for p in parts_list
-        ]
-
-        total_placed_area = 0
-        total_part_area = sum(p.area for p in parts_list)
-
-        for part in buffered_parts:
+        for part in parts:
             placed = False
 
-            for angle in [0, 90]:  # optimized rotations
-                if placed:
-                    break
+            for angle in [0, 90]:
+                if placed: break
 
-                rot = rotate(part, angle, origin='centroid')
-                min_x, min_y, max_x, max_y = rot.bounds
-                poly_norm = translate(rot, -min_x, -min_y)
+                r = rotate(part, angle, origin='centroid')
+                minx, miny, maxx, maxy = r.bounds
+                r = translate(r, -minx, -miny)
 
-                w, h = max_x - min_x, max_y - min_y
+                w, h = maxx-minx, maxy-miny
+                step = max(10, int(min(w,h)/3))
 
-                step = max(10, int(min(w, h) / 3))  # adaptive step
+                for sid, sheet in enumerate(sheets):
+                    for y in range(int(self.margin), int(H-h-self.margin), step):
+                        for x in range(int(self.margin), int(W-w-self.margin), step):
 
-                for s_id, sheet_content in enumerate(self.sheets):
+                            trial = translate(r, x, y)
 
-                    for y in range(int(self.margin), int(self.sheet_h - h - self.margin), step):
-                        for x in range(int(self.margin), int(self.sheet_w - w - self.margin), step):
-
-                            trial = translate(poly_norm, x, y)
-
-                            if not any(trial.intersects(p) for p in sheet_content):
-                                self.sheets[s_id].append(trial)
-                                total_placed_area += part.area
+                            if not any(trial.intersects(p) for p in sheet):
+                                sheets[sid].append(trial)
                                 placed = True
                                 break
-
-                        if placed:
-                            break
-                    if placed:
-                        break
+                        if placed: break
+                    if placed: break
 
             if not placed:
-                self.sheets.append([translate(part, self.margin, self.margin)])
-                total_placed_area += part.area
+                sheets.append([translate(part, self.margin, self.margin)])
 
-        total_sheets = len(self.sheets)
-        sheet_area_total = self.sheet_w * self.sheet_h * total_sheets
+        total_area = sum(p.area for p in parts)
+        total_sheet_area = len(sheets) * W * H
+        utilization = (total_area / total_sheet_area) * 100
 
-        self.utilization = (total_placed_area / sheet_area_total) * 100
-        estimated_sheets = total_part_area / (self.sheet_w * self.sheet_h)
+        return sheets, utilization
 
-        return {
-            "layouts": self.sheets,
-            "total_sheets": total_sheets,
-            "utilization": self.utilization,
-            "estimated_sheets": estimated_sheets,
-            "total_part_area": total_part_area
-        }
+    def optimize_standard_sheets(self, parts):
 
-# --- UI ---
-st.title("⚙️ ProNester: DXF & SVG Optimizer")
+        standard_sizes = [
+            (2500,1250),
+            (3000,1500),
+            (2000,1000),
+            (1500,3000)
+        ]
+
+        best = None
+
+        for W, H in standard_sizes:
+
+            sheets, util = self.nest_on_sheet(parts, W, H)
+
+            result = {
+                "W": W,
+                "H": H,
+                "sheets": len(sheets),
+                "util": util,
+                "layouts": sheets
+            }
+
+            if best is None:
+                best = result
+            else:
+                # priority: fewer sheets, then higher utilization
+                if result["sheets"] < best["sheets"] or (
+                    result["sheets"] == best["sheets"] and result["util"] > best["util"]
+                ):
+                    best = result
+
+        return best
+
+# -------- UI --------
+st.title("⚙️ ProNester – Smart Sheet Optimizer")
 
 with st.sidebar:
-    st.header("1. Sheet Setup")
-    SW = st.number_input("Sheet Width (mm)", min_value=100, value=2500)
-    SH = st.number_input("Sheet Height (mm)", min_value=100, value=1250)
-    GAP = st.slider("Part Gap (mm)", 0.0, 10.0, 3.0)
-    MARGIN = st.slider("Sheet Margin (mm)", 0.0, 20.0, 5.0)
+    GAP = st.slider("Gap (mm)", 0.0, 10.0, 3.0)
+    MARGIN = st.slider("Margin (mm)", 0.0, 20.0, 5.0)
 
-    st.header("2. Files")
-    uploaded_files = st.file_uploader(
-        "Upload Files",
-        type=["dxf", "svg"],
-        accept_multiple_files=True
-    )
+    files = st.file_uploader("Upload DXF/SVG", type=["dxf","svg"], accept_multiple_files=True)
 
-if uploaded_files:
-    nester = ProNesterEngine(SW, SH, GAP, MARGIN)
-    master_list = []
+if files:
+    engine = SmartNester(GAP, MARGIN)
+    parts = []
 
-    st.subheader("3. Set Quantities")
+    st.subheader("Set Quantity")
 
-    for f in uploaded_files:
-        if f.name.endswith('.svg'):
-            shapes = nester.extract_from_svg(f)
-        else:
-            shapes = nester.extract_from_dxf(f)
+    for f in files:
+        shapes = engine.extract_from_svg(f) if f.name.endswith(".svg") else engine.extract_from_dxf(f)
 
         if shapes:
-            c1, c2 = st.columns([3, 1])
-            c1.write(f"✅ **{f.name}** ({len(shapes)} shapes)")
-            qty = c2.number_input(f"Qty", 1, 100, 1, key=f"q_{f.name}")
+            c1,c2 = st.columns([3,1])
+            c1.write(f"✅ {f.name}")
+            qty = c2.number_input("Qty",1,100,1,key=f.name)
 
             for _ in range(qty):
-                master_list.extend(shapes)
-        else:
-            st.error(f"❌ No valid shapes in {f.name}")
+                parts.extend(shapes)
 
-    st.markdown("---")
+    if st.button("🚀 Optimize Sheet Selection"):
 
-    if st.button("🚀 Start Nesting", use_container_width=True) and master_list:
-        with st.spinner("Nesting in progress..."):
-            result = nester.nest(master_list)
-
-        actual_sheets = result["total_sheets"]
-        estimated_sheets = result["estimated_sheets"]
+        with st.spinner("Finding best sheet size..."):
+            best = engine.optimize_standard_sheets(parts)
 
         st.success(
             f"""
-            ✅ Nesting Completed  
-            📄 Actual Sheets Required: **{actual_sheets}**  
-            ⚡ Estimated Sheets (Ideal): **{estimated_sheets:.2f}**  
-            📊 Utilization: **{result['utilization']:.2f}%**
+            🏆 Best Sheet Size: **{best['W']} x {best['H']} mm**  
+            📄 Sheets Required: **{best['sheets']}**  
+            📊 Utilization: **{best['util']:.2f}%**
             """
         )
 
-        # --- Visualization ---
-        fig, ax = plt.subplots(figsize=(12, 6))
+        fig, ax = plt.subplots(figsize=(12,6))
         ax.set_aspect('equal')
 
-        out_doc = ezdxf.new('R2010')
-        msp = out_doc.modelspace()
+        for i, sheet in enumerate(best["layouts"]):
+            offset = i * (best["W"] + 200)
 
-        for i, sheet in enumerate(result["layouts"]):
-            off_x = i * (SW + 200)
-
-            ax.add_patch(
-                patches.Rectangle((off_x, 0), SW, SH, fill=False)
-            )
+            ax.add_patch(patches.Rectangle((offset,0), best["W"], best["H"], fill=False))
 
             for poly in sheet:
-                x, y = poly.exterior.xy
-
-                ax.fill(
-                    [px + off_x for px in x],
-                    y,
-                    alpha=0.5
-                )
-
-                msp.add_lwpolyline([
-                    (px + off_x, py)
-                    for px, py in poly.exterior.coords
-                ])
+                x,y = poly.exterior.xy
+                ax.fill([px+offset for px in x], y, alpha=0.5)
 
         st.pyplot(fig)
 
-        # --- Download ---
-        dxf_io = io.StringIO()
-        out_doc.write(dxf_io)
-
-        st.download_button(
-            "📥 Download Result DXF",
-            dxf_io.getvalue(),
-            "nest_output.dxf"
-        )
-
 else:
-    st.info("Please upload DXF or SVG files in the sidebar.")
+    st.info("Upload files to begin")
