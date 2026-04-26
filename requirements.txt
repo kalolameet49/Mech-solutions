@@ -1,2 +1,5 @@
 streamlit
 requests
+fastapi
+uvicorn
+python-multipart
