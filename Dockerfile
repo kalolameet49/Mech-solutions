@@ -4,8 +4,8 @@ WORKDIR /app
 
 COPY . .
 
-# Install Python deps
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Start API
-CMD uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}
+EXPOSE 8501
+
+CMD ["streamlit", "run", "main.py", "--server.port=8501", "--server.address=0.0.0.0"]
