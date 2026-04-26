@@ -1,6 +1,5 @@
 {
-  "name": "pronester",
-  "version": "1.0.0",
+  "name": "deepnest-api",
   "dependencies": {
     "deepnest-cli": "^1.0.0"
   }
