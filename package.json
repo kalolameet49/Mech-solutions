@@ -1,6 +1,0 @@
-{
-  "name": "deepnest-api",
-  "dependencies": {
-    "deepnest-cli": "^1.0.0"
-  }
-}
