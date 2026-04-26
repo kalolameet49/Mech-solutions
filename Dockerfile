@@ -1,12 +1,20 @@
-FROM python:3.11-slim
+FROM node:18-bullseye
+
+# Install Python
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy project
 COPY . .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python deps
+RUN pip3 install -r requirements.txt
 
-# Start Streamlit using Railway's PORT variable
-CMD streamlit run main.py --server.port=${PORT:-8501} --server.address=0.0.0.0
+# Install Deepnest CLI
+RUN npm install -g deepnest-cli
+
+# Start API
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
