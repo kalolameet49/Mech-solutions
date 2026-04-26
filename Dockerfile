@@ -1,15 +1,15 @@
-FROM python:3.10-slim
+FROM node:18-bullseye
 
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    nodejs npm \
-    && rm -rf /var/lib/apt/lists/*
+    python3 python3-pip build-essential
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-
 COPY . .
 
-CMD ["streamlit", "run", "main.py", "--server.address=0.0.0.0"]
+RUN pip3 install -r requirements.txt
+RUN npm install -g deepnest-cli
+
+EXPOSE 8501 8000
+
+CMD bash start.sh
