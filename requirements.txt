@@ -1,8 +1,5 @@
 streamlit
-celery
-redis
-sqlalchemy
-ezdxf
-shapely
-matplotlib
-svgelements
+fastapi
+uvicorn
+requests
+python-multipart
