@@ -1,11 +1,14 @@
-FROM python:3.11-slim
+FROM node:18-bullseye
+
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
 COPY . .
 
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip3 install -r requirements.txt
+RUN npm install -g deepnest-cli
 
-EXPOSE 8501
-
-CMD ["streamlit", "run", "main.py", "--server.port=8501", "--server.address=0.0.0.0"]
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port $PORT"]
