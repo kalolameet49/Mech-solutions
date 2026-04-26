@@ -1,15 +1,20 @@
 import subprocess
+import uuid
+import os
 
-def run_deepnest(input_path, output_path):
+def run_deepnest(input_file):
+    job_id = str(uuid.uuid4())
+    output_file = f"/tmp/{job_id}_out.svg"
+
     try:
         subprocess.run([
             "deepnest",
-            "--input", input_path,
-            "--output", output_path,
+            "--input", input_file,
+            "--output", output_file,
             "--spacing", "3"
         ], check=True)
 
-        return True
+        return output_file, None
+
     except Exception as e:
-        print(e)
-        return False
+        return None, str(e)
