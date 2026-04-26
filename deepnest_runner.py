@@ -1,14 +1,12 @@
 import subprocess
 import uuid
-import os
 
 def run_deepnest(input_file):
-    job_id = str(uuid.uuid4())
-    output_file = f"/tmp/{job_id}_out.svg"
+    output_file = f"/tmp/{uuid.uuid4()}.svg"
 
     try:
         subprocess.run([
-            "deepnest",
+            "deepnest-cli",
             "--input", input_file,
             "--output", output_file,
             "--spacing", "3"
