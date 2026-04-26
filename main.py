@@ -1,31 +1,36 @@
 import streamlit as st
-import requests
+import tempfile
+import os
+from deepnest_runner import run_deepnest
 
 st.set_page_config(page_title="ProNester Cloud", layout="wide")
 
-st.title("⚙️ ProNester (Deepnest Engine)")
+st.title("⚙️ ProNester (Deepnest Powered)")
 
-API_URL = "http://localhost:8000/nest"
-
-uploaded_file = st.file_uploader("Upload SVG", type=["svg"])
+uploaded_file = st.file_uploader("Upload SVG file", type=["svg"])
 
 if uploaded_file:
-    st.success("File uploaded")
+    st.success("File uploaded successfully")
 
     if st.button("🚀 Run Nesting"):
-        with st.spinner("Processing..."):
+        with st.spinner("Running Deepnest..."):
 
-            files = {
-                "file": (uploaded_file.name, uploaded_file.getvalue())
-            }
+            # Save uploaded file temporarily
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".svg") as tmp:
+                tmp.write(uploaded_file.getvalue())
+                input_path = tmp.name
 
-            res = requests.post(API_URL, files=files)
+            # Run Deepnest
+            output_path, error = run_deepnest(input_path)
 
-            if res.status_code == 200:
-                st.download_button(
-                    "📥 Download Nested File",
-                    res.content,
-                    file_name="nested.svg"
-                )
+            if error:
+                st.error(f"Error: {error}")
+            elif output_path and os.path.exists(output_path):
+                with open(output_path, "rb") as f:
+                    st.download_button(
+                        "📥 Download Nested File",
+                        f,
+                        file_name="nested.svg"
+                    )
             else:
-                st.error("Failed to process")
+                st.error("Deepnest failed")
