@@ -129,13 +129,12 @@ class ProNester:
         return placed
 
     # ---------- REFINEMENT ----------
-    def refine_layout(self, placed, iterations=200):
+    def refine_layout(self, placed, iterations=150):
 
         current = placed[:]
         best = placed[:]
 
         best_score, _, _ = self.score_layout(best)
-
         T = 100.0
 
         for _ in range(iterations):
@@ -174,7 +173,6 @@ class ProNester:
 
         best_layout = None
         best_score = float('inf')
-        best_W, best_H = 0, 0
 
         parts = [p.buffer(self.gap / 2) for p in parts]
 
@@ -185,20 +183,31 @@ class ProNester:
             placed = self.initial_pack(parts)
             placed = self.refine_layout(placed)
 
-            score, W, H = self.score_layout(placed)
+            score, _, _ = self.score_layout(placed)
 
             if score < best_score:
                 best_score = score
                 best_layout = placed
-                best_W, best_H = W, H
 
-        util = (sum(p.area for p in parts) / (best_W * best_H)) * 100
+        # 🔥 FINAL MINIMUM SHEET
+        union = unary_union(best_layout)
+        minx, miny, maxx, maxy = union.bounds
 
-        return best_W, best_H, best_layout, util
+        W = maxx - minx + self.margin
+        H = maxy - miny + self.margin
+
+        # shift to origin
+        final_layout = []
+        for p in best_layout:
+            final_layout.append(translate(p, -minx + self.margin, -miny + self.margin))
+
+        util = (sum(p.area for p in parts) / (W * H)) * 100
+
+        return W, H, final_layout, util
 
 
 # ---------------- UI ----------------
-st.title("⚙️ ProNester – Advanced Nesting Engine")
+st.title("⚙️ ProNester – Quantity Based Nesting")
 
 with st.sidebar:
     GAP = st.slider("Gap (mm)", 0.0, 10.0, 3.0)
@@ -209,18 +218,27 @@ if files:
     engine = ProNester(GAP, MARGIN)
     parts = []
 
+    st.subheader("📦 Set Quantity")
+
     for f in files:
         shapes = engine.extract_from_svg(f) if f.name.endswith(".svg") else engine.extract_from_dxf(f)
-        parts.extend(shapes)
+
+        if shapes:
+            c1, c2 = st.columns([3,1])
+            c1.write(f"✅ {f.name}")
+            qty = c2.number_input("Qty", 1, 500, 1, key=f.name)
+
+            for _ in range(qty):
+                parts.extend(shapes)
 
     if st.button("🚀 Run Nesting"):
 
-        with st.spinner("Optimizing nesting..."):
+        with st.spinner("Optimizing..."):
             W, H, layout, util = engine.nest(parts)
 
-        st.success(f"📐 Sheet Size: {W:.0f} x {H:.0f} mm | Utilization: {util:.2f}%")
+        st.success(f"📐 Sheet: {W:.0f} x {H:.0f} mm | Utilization: {util:.2f}%")
 
-        fig, ax = plt.subplots(figsize=(10,5))
+        fig, ax = plt.subplots(figsize=(12,6))
         ax.set_aspect('equal')
 
         ax.add_patch(patches.Rectangle((0,0), W, H, fill=False))
