@@ -1,5 +1,6 @@
 streamlit
-requests
-fastapi
-uvicorn
-python-multipart
+ezdxf
+shapely
+matplotlib
+svgelements
+numpy
